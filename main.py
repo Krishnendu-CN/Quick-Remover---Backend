@@ -22,7 +22,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MAX_UPLOAD_SIZE = 12 * 1024 * 1024  # 12MB
+MAX_UPLOAD_SIZE = 300 * 1024  # 200KB
 ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg"}
 
 # OAuth2 scheme
