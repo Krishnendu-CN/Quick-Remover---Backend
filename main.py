@@ -16,7 +16,7 @@ app = FastAPI(title="BG Remove API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "https://quick-remover-frontend.vercel.app"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "https://quick-remover-frontend.vercel.app/"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -76,33 +76,46 @@ async def remove_bg(image: UploadFile = File(...)):
         raise HTTPException(status_code=413, detail="File too large")
 
     try:
-        pil_img = Image.open(BytesIO(data)).convert("RGBA")
-        img = np.array(pil_img)
+        # Load as OpenCV BGR
+        file_bytes = np.frombuffer(data, np.uint8)
+        bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-        # Convert RGBA to BGR for OpenCV
-        bgr_img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+        if bgr is None:
+            raise HTTPException(status_code=400, detail="Could not read image")
 
-        # Convert to HSV for background masking
-        hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
+        h, w = bgr.shape[:2]
 
-        # Example: remove white background
-        lower = np.array([0, 0, 200])
-        upper = np.array([180, 30, 255])
-        mask = cv2.inRange(hsv, lower, upper)
-        mask_inv = cv2.bitwise_not(mask)
+        # Init mask for GrabCut
+        mask = np.zeros((h, w), np.uint8)
+        bgdModel = np.zeros((1, 65), np.float64)
+        fgdModel = np.zeros((1, 65), np.float64)
+
+        rect = (10, 10, w - 20, h - 20)
+        cv2.grabCut(bgr, mask, rect, bgdModel, fgdModel, 5, cv2.GC_INIT_WITH_RECT)
+
+        # Foreground mask
+        mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype("uint8")
 
         # Create alpha channel
-        alpha = mask_inv.astype(np.uint8)
+        alpha = (mask2 * 255).astype(np.uint8)
 
-        # Merge channels
-        b, g, r = cv2.split(bgr_img)
-        rgba = cv2.merge([r, g, b, alpha])
+        # Merge BGR + Alpha
+        b, g, r = cv2.split(bgr)
+        bgra = cv2.merge([b, g, r, alpha])
 
+        # Convert BGR(A) -> RGB(A) to fix "blue skin" issue
+        rgba = cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGBA)
+
+        # Smooth alpha edges
+        alpha_blurred = cv2.GaussianBlur(rgba[:, :, 3], (5, 5), 0)
+        rgba[:, :, 3] = alpha_blurred
+
+        # Save to BytesIO
         out_img = Image.fromarray(rgba)
-
         out_io = BytesIO()
         out_img.save(out_io, format="PNG")
         out_io.seek(0)
+
         return StreamingResponse(out_io, media_type="image/png")
 
     except Exception as e:
@@ -134,50 +147,48 @@ async def save_edited(
         raise HTTPException(status_code=413, detail="File too large")
 
     try:
+        # Always open as RGBA
         img = Image.open(BytesIO(data)).convert("RGBA")
-        alpha_channel = img.getchannel('A') if img.mode == 'RGBA' else None
 
-        # Rotation
+        # Keep alpha separate so it doesn’t get lost
+        alpha_channel = img.getchannel("A")
+
+        # ---------- Rotation ----------
         if rotation != 0:
             img = img.rotate(rotation, expand=True)
-            if alpha_channel:
-                alpha_channel = alpha_channel.rotate(rotation, expand=True)
+            alpha_channel = alpha_channel.rotate(rotation, expand=True)
 
-        # Flip
+        # ---------- Flip ----------
         if flip_horizontal:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
-            if alpha_channel:
-                alpha_channel = alpha_channel.transpose(Image.FLIP_LEFT_RIGHT)
+            alpha_channel = alpha_channel.transpose(Image.FLIP_LEFT_RIGHT)
         if flip_vertical:
             img = img.transpose(Image.FLIP_TOP_BOTTOM)
-            if alpha_channel:
-                alpha_channel = alpha_channel.transpose(Image.FLIP_TOP_BOTTOM)
+            alpha_channel = alpha_channel.transpose(Image.FLIP_TOP_BOTTOM)
 
-        # Brightness, Contrast, Saturation
+        # ---------- Brightness / Contrast / Saturation ----------
         if brightness != 100 or contrast != 100 or saturation != 100:
-            rgb_img = img.convert('RGB')
+            rgb_img = img.convert("RGB")
             if brightness != 100:
-                rgb_img = ImageEnhance.Brightness(rgb_img).enhance(brightness/100)
+                rgb_img = ImageEnhance.Brightness(rgb_img).enhance(brightness / 100)
             if contrast != 100:
-                rgb_img = ImageEnhance.Contrast(rgb_img).enhance(contrast/100)
+                rgb_img = ImageEnhance.Contrast(rgb_img).enhance(contrast / 100)
             if saturation != 100:
-                rgb_img = ImageEnhance.Color(rgb_img).enhance(saturation/100)
-            img = rgb_img.convert('RGBA')
-            if alpha_channel and alpha_channel.size == img.size:
-                r, g, b, _ = img.split()
-                img = Image.merge('RGBA', (r, g, b, alpha_channel))
+                rgb_img = ImageEnhance.Color(rgb_img).enhance(saturation / 100)
+            # Reattach alpha
+            img = rgb_img.convert("RGBA")
+            img.putalpha(alpha_channel)
 
-        # Blur
+        # ---------- Blur ----------
         if blur > 0:
-            if alpha_channel:
-                r, g, b, a = img.split()
-                blurred_rgb = Image.merge('RGB', (r, g, b)).filter(ImageFilter.GaussianBlur(radius=blur))
-                r_blur, g_blur, b_blur = blurred_rgb.split()
-                img = Image.merge('RGBA', (r_blur, g_blur, b_blur, a))
-            else:
-                img = img.filter(ImageFilter.GaussianBlur(radius=blur))
+            r, g, b, a = img.split()
+            blurred_rgb = Image.merge("RGB", (r, g, b)).filter(
+                ImageFilter.GaussianBlur(radius=blur)
+            )
+            r_blur, g_blur, b_blur = blurred_rgb.split()
+            img = Image.merge("RGBA", (r_blur, g_blur, b_blur, a))
 
-        # Sepia
+        # ---------- Sepia ----------
         if sepia > 0:
             sepia_intensity = sepia / 100
             width, height = img.size
@@ -187,18 +198,40 @@ async def save_edited(
                 for x in range(width):
                     r, g, b, a = pixels[x, y]
                     if a > 0:
-                        tr = min(255, int((r*(1-0.607*sepia_intensity)) + (g*0.769*sepia_intensity) + (b*0.189*sepia_intensity)))
-                        tg = min(255, int((r*0.349*sepia_intensity) + (g*(1-0.314*sepia_intensity)) + (b*0.168*sepia_intensity)))
-                        tb = min(255, int((r*0.272*sepia_intensity) + (g*0.534*sepia_intensity) + (b*(1-0.869*sepia_intensity))))
+                        tr = min(
+                            255,
+                            int(
+                                (r * (1 - 0.607 * sepia_intensity))
+                                + (g * 0.769 * sepia_intensity)
+                                + (b * 0.189 * sepia_intensity)
+                            ),
+                        )
+                        tg = min(
+                            255,
+                            int(
+                                (r * 0.349 * sepia_intensity)
+                                + (g * (1 - 0.314 * sepia_intensity))
+                                + (b * 0.168 * sepia_intensity)
+                            ),
+                        )
+                        tb = min(
+                            255,
+                            int(
+                                (r * 0.272 * sepia_intensity)
+                                + (g * 0.534 * sepia_intensity)
+                                + (b * (1 - 0.869 * sepia_intensity))
+                            ),
+                        )
                         pixels[x, y] = (tr, tg, tb, a)
             img = sepia_img
 
-        # Background color
+        # ---------- Background ----------
         if bg_type == "color" and bg_color:
             bg_rgb = hex_to_rgb(bg_color)
             bg_img = Image.new("RGBA", img.size, bg_rgb + (255,))
             img = Image.alpha_composite(bg_img, img)
 
+        # ---------- Output ----------
         out_io = BytesIO()
         img.save(out_io, format="PNG", optimize=True)
         out_io.seek(0)
