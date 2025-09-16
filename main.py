@@ -27,10 +27,19 @@ MAX_UPLOAD_SIZE = 12 * 1024 * 1024  # 12MB
 ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg"}
 
 # Create rembg session once
-session = new_session("isnet-general-use")
+# session = new_session("isnet-general-use")
 
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+session = None
+
+def get_session():
+    global session
+    if session is None:
+        from rembg import new_session
+        session = new_session("isnet-general-use")
+    return session
 
 # Dependency to get DB session
 def get_db():
@@ -78,7 +87,8 @@ async def remove_bg(
     try:
         input_img = Image.open(BytesIO(data))
         input_img.thumbnail((400, 400))
-        output_img = remove(input_img, session=session)
+        # output_img = remove(input_img, session=session)
+        output_img = remove(input_img, session=get_session())
         output_img = output_img.convert("RGBA")
 
         out_io = BytesIO()
