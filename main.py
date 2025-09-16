@@ -77,7 +77,7 @@ async def remove_bg(
 
     try:
         input_img = Image.open(BytesIO(data))
-        input_img.thumbnail((1024, 1024))  # max width/height
+        input_img.thumbnail((400, 400))
         output_img = remove(input_img, session=session)
         output_img = output_img.convert("RGBA")
 
